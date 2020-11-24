@@ -26,7 +26,7 @@ from six import raise_from
 import csv
 import sys
 import os.path
-
+import math
 
 def _parse(value, function, fmt):
     """
@@ -55,7 +55,6 @@ def _read_classes(csv_reader):
             raise ValueError('line {}: duplicate class name: \'{}\''.format(line, class_name))
         result[class_name] = class_id
     return result
-
 
 def _read_annotations(csv_reader, classes):
     result = {}
@@ -89,7 +88,6 @@ def _read_annotations(csv_reader, classes):
 
         result[img_file].append({'x1': x1, 'x2': x2, 'y1': y1, 'y2': y2, 'class': class_name})
     return result
-
 
 def _open_for_csv(path):
     """
@@ -125,6 +123,7 @@ class CSVGenerator(Generator):
             self.image_type = 'mono'
             
         if mean_image_file is not None:
+
             self.mean_image = np.load(mean_image_file)
         else:
             self.mean_image = None

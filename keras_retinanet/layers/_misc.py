@@ -90,7 +90,7 @@ class NonMaximumSuppression(keras.layers.Layer):
     def loopBody(self, detections):
         boxes = detections[:,:4]
         classification = detections[:,4:]
-
+        
         scores = keras.backend.max(classification, axis=1)
         # selecting best anchors theoretically improves speed at the cost of minor performance
         if self.top_k:
@@ -107,6 +107,7 @@ class NonMaximumSuppression(keras.layers.Layer):
             soft_nms_sigma=self.soft_nms_sigma)
 
         detections = keras.backend.gather(detections, indices)
+        
         original_scores = keras.backend.gather(scores, indices)
         # Degrade the classification vector
         classification = detections[:,4:]

@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import keras
+import keras.applications.imagenet_utils
 import keras_resnet
 import keras_resnet.models
 from ..models import retinanet

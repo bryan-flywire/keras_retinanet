@@ -272,6 +272,7 @@ def parse_args():
     csv_parser.add_argument('--force-aspect-ratio', help='Force a given aspect ratio prior to resizing')
 
     parser.add_argument('--weights', help='Weights to use for initialization (defaults to ImageNet).', default='imagenet')
+    parser.add_argument('--train_img_dir', help='Path to training images')
     parser.add_argument('--batch-size', help='Size of the batches.', default=1, type=int)
     parser.add_argument('--gpu', help='Id of the GPU to use (as reported by nvidia-smi).')
     parser.add_argument('--multi-gpu', help='Number of GPUs to use for parallel processing.', type=int, default=0)
