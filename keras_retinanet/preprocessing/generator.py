@@ -19,32 +19,37 @@ import random
 import threading
 import time
 import warnings
+import math
 
 import keras
 
-from ..utils.image import preprocess_image, resize_image, random_transform
+from ..utils.image import preprocess_image, preprocess_mono_image, preprocess_gray_image, resize_image, random_transform, resize_and_fill
 from ..utils.anchors import anchor_targets_bbox
 
 
-class Generator(object):
+class Generator(keras.utils.Sequence):
     def __init__(
         self,
         image_data_generator,
         batch_size=1,
-        group_method='ratio',  # one of 'none', 'random', 'ratio'
+        group_method='random',  # one of 'none', 'random', 'ratio'
         shuffle_groups=True,
         image_min_side=1080,
         image_max_side=1920,
-        group_queue=None,
+        force_aspect_ratio=None,
         seed=None
     ):
         self.image_data_generator = image_data_generator
         self.batch_size           = int(batch_size)
-        self.group_queue          = group_queue
         self.group_method         = group_method
         self.shuffle_groups       = shuffle_groups
         self.image_min_side       = image_min_side
         self.image_max_side       = image_max_side
+
+        if force_aspect_ratio:
+            self.force_aspect_ratio   = float(force_aspect_ratio)
+        else:
+            self.force_aspect_ratio = None
 
         if seed is None:
             seed = np.uint32((time.time() % 1)) * 1000
@@ -54,6 +59,10 @@ class Generator(object):
         self.lock        = threading.Lock()
 
         self.group_images()
+
+    def on_epoch_end(self):
+        if self.shuffle_groups:
+            random.shuffle(self.groups)
 
     def size(self):
         raise NotImplementedError('size method not implemented')
@@ -110,29 +119,76 @@ class Generator(object):
     def load_image_group(self, group):
         return [self.load_image(image_index) for image_index in group]
 
+    def force_aspect(self, image):
+        """ Given an image; force it to be given aspect ratio prior to resizing """
+        img_height = image.shape[0]
+        img_width = image.shape[1]
+        img_aspect = img_width / img_height
+        if img_aspect < self.force_aspect_ratio:
+            # This is when the image is boxier than the aspect ratio
+            # so we add a black bar at the right side to compensate
+            # this added bar does not effect annotation coordinates
+            new_img_width = round(img_height * self.force_aspect_ratio)
+            image,sf = resize_and_fill(image, (img_height, new_img_width))
+        else:
+            # This is when the image is narrower than the aspect ratio
+            # so we add a black bar at the bottom to compensate
+            # this added bar does not effect annotation coordinates
+            new_img_height = round(img_width / self.force_aspect_ratio)
+            image,sf = resize_and_fill(image, (new_img_height, img_width))
+        assert math.isclose(sf[0],1.0) and math.isclose(sf[1],1.0)
+        return image
     def resize_image(self, image):
         return resize_image(image, min_side=self.image_min_side, max_side=self.image_max_side)
 
     def preprocess_image(self, image):
-        return preprocess_image(image, mean_image=self.mean_image)
+        image_preprocessors = {
+            'rgb' : preprocess_image,
+            'mono': preprocess_gray_image
+        }
+        
+        try:
+            _ = self.image_type
+        except AttributeError:
+            self.image_type = 'rgb'
+
+        return image_preprocessors[self.image_type](image, mean_image=self.mean_image)
+
+    def preprocess_group_entry(self, image, annotations):
+        """ Preprocess image and its annotations.
+        """
+
+        # preprocess the image
+        image = self.preprocess_image(image)
+
+        # force aspect ratio prior to resizing
+        if self.force_aspect_ratio:
+            aspect_ratio = self.image_max_side / self.image_min_side
+            if not math.isclose(aspect_ratio, self.force_aspect_ratio):
+                image = self.force_aspect(image)
+
+        # resize image
+        image, image_scale = self.resize_image(image)
+
+        # apply resizing to annotations too
+        annotations[:, :4] *= image_scale
+        
+        # randomly transform the image and annotations
+        image, annotations = random_transform(image, annotations, self.image_data_generator)
+
+        # convert to the wanted keras floatx
+        image = keras.backend.cast_to_floatx(image)
+
+        return image, annotations
 
     def preprocess_group(self, image_group, annotations_group):
-        for index, (image, annotations) in enumerate(zip(image_group, annotations_group)):
-            # preprocess the image (subtract imagenet mean)
-            image = self.preprocess_image(image)
+        """ Preprocess each image and its annotations in its group.
+        """
+        assert(len(image_group) == len(annotations_group))
 
-            # randomly transform both image and annotations
-            image, annotations = random_transform(image, annotations, self.image_data_generator)
-
-            # resize image
-            image, image_scale = self.resize_image(image)
-
-            # apply resizing to annotations too
-            annotations[:, :4] *= image_scale
-
-            # copy processed data back to group
-            image_group[index]       = image
-            annotations_group[index] = annotations
+        for index in range(len(image_group)):
+            # preprocess a single group entry
+            image_group[index], annotations_group[index] = self.preprocess_group_entry(image_group[index], annotations_group[index])
 
         return image_group, annotations_group
 
@@ -215,21 +271,19 @@ class Generator(object):
 
         return inputs, targets
 
-    def __next__(self):
-        return self.next()
-
-    def next(self):
-        # advance the group index
-        # with self.lock:
-        if self.group_index == 0 and self.shuffle_groups:
-            # shuffle groups at start of epoch
-            random.shuffle(self.groups)
-        group = self.groups[self.group_index]
-        self.group_queue.put(group)
-        self.group_index = (self.group_index + 1) % len(self.groups)
-
-    def start(self):
-        """ Starts pushing data onto queue.
+    def __len__(self):
         """
-        while True:
-            self.__next__()
+        Number of batches for generator.
+        """
+
+        return len(self.groups)
+
+    def __getitem__(self, index):
+        """
+        Keras sequence method for generating batches.
+        """
+        group = self.groups[index]
+        inputs, targets = self.compute_input_output(group)
+
+        return inputs, targets
+

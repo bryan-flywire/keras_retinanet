@@ -21,6 +21,7 @@ import keras.preprocessing.image
 from keras_retinanet.models.resnet import custom_objects
 from keras_retinanet.utils.keras_version import check_keras_version
 from keras_retinanet.utils.image import resize_image
+from functools import partial
 import tensorflow as tf
 import numpy as np
 import argparse
@@ -32,14 +33,31 @@ import cv2
 import json
 import pickle
 import multiprocessing as mp
+import signal
+import time
 
-def format_img(img,mean_image):
-    img = img[:, :, (2, 1, 0)]
+def signal_handler(stop_event, frame_stop_event,signal_received, frame):
+    # Handle any cleanup here
+    stop_event.set()
+    frame_stop_event.set()
+    print('SIGINT or CTRL-C detected. Exiting gracefully')
+    for i in range(10):
+        print(f'Shutting down in {10-i}')
+        time.sleep(1)
+
+def format_img(img,mean_image=None):
+    #img = img[:, :, (2, 1, 0)]
     img = img.astype(np.float32)
-    img[:, :, 0] -= mean_image[:,:,0]
-    img[:, :, 1] -= mean_image[:,:,1]
-    img[:, :, 2] -= mean_image[:,:,2]
     img, scale = resize_image(img, args.min_side, args.max_side)
+    if mean_image is not None:
+        mean_image,_ = resize_image(mean_image,args.min_side,args.max_side)
+        img[:, :, 0] -= mean_image[:,:,0]
+        img[:, :, 1] -= mean_image[:,:,1]
+        img[:, :, 2] -= mean_image[:,:,2]
+    else:
+        img[..., 0] -= 103.939
+        img[..., 1] -= 116.779
+        img[..., 2] -= 123.68
     return img
 
 def read_frames(img_path, raw_frame_queue, stop_event):
@@ -84,11 +102,12 @@ def parse_args():
             description='Testing script for testing video data.')
     parser.add_argument('model', help='Path to RetinaNet model.')
     parser.add_argument('video_path', 
-            help='Path to COCO directory (ie. /tmp/COCO).')
-    parser.add_argument('mean_image',
-            help='Path to mean image to subtract')
+            help='Path to video file')
     parser.add_argument('--gpu', 
             help='Id of the GPU to use (as reported by nvidia-smi).')
+    parser.add_argument('--mean_image',
+            help='Path to mean image to subtract',
+            default=None)
     parser.add_argument('--score-threshold', 
             help='Threshold to filter detections', 
             default=0.7, 
@@ -111,7 +130,10 @@ def parse_args():
 if __name__ == '__main__':
     # parse arguments
     args = parse_args()
-    mean_image = np.load(args.mean_image)
+    if args.mean_image is not None:
+        mean_image = np.load(args.mean_image)
+    else:
+        mean_image = None
     # make sure keras is the minimum required version
     check_keras_version()
 
@@ -128,6 +150,9 @@ if __name__ == '__main__':
     frame_queue = mp.Queue(50)
     stop_event = mp.Event()
     frame_stop_event = mp.Event()
+    signal.signal(
+        signal.SIGINT, 
+        partial(signal_handler, stop_event, frame_stop_event))
     p = mp.Process(target=read_frames, args=(args.video_path,raw_queue,stop_event))
     p.daemon = True
     p.start()
@@ -166,13 +191,13 @@ if __name__ == '__main__':
 
         # compute predicted labels and scores
         for detection in detections[0, ...]:
-            label = np.argmax(detection[4:])
+            label = int(detection[4])
             if float(detection[4 + label]) > args.score_threshold:
                 image_result = {
                     'frame'       : frame,
                     'category_id' : label,
                     'scores'      : [float(det) for i,det in
-                                      enumerate(detection) if i >=4],
+                                      enumerate(detection) if i >=5],
                     'bbox'        : (detection[:4]).tolist(),
                 }
                 # append detection to results
@@ -180,7 +205,8 @@ if __name__ == '__main__':
 
     if len(results):
         # write output
-        out_name = re.split(".mp4",args.video_path.split('/')[-1],flags=re.IGNORECASE)[0]
+        out_name = re.split(".mov",args.video_path.split('/')[-1],flags=re.IGNORECASE)[0]
+        print(out_name)
         try:
             #json.dump(results, open('{}_bbox_results.json'.format(out_name), 'w'), indent=4)
             pickle.dump(results,open('{}_bbox_results_{}.pickle'.format(out_name, args.score_threshold),'wb'))

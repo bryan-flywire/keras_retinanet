@@ -63,7 +63,7 @@ def default_classification_model(
 
     outputs = keras.layers.Conv2D(
         filters=num_classes * num_anchors,
-        kernel_initializer=keras.initializers.zeros(),
+        kernel_initializer=keras.initializers.Zeros(),
         bias_initializer=initializers.PriorProbability(probability=prior_probability),
         name='pyramid_classification',
         **options

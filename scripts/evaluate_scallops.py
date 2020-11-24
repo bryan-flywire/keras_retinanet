@@ -48,13 +48,14 @@ def get_session():
 def parse_args():
     parser = argparse.ArgumentParser(description='Simple training script for COCO object detection.')
     parser.add_argument('model', help='Path to RetinaNet model.')
-    parser.add_argument('test_path', help='Path to test images directory (ie. /tmp/COCO).')
+    parser.add_argument('test_path', help='Path to file containing list of test images')
     parser.add_argument('class_file', help='Name of the class file to evaluate')
-    parser.add_argument('mean_image', help='Mean image file to subtract')
+    parser.add_argument('--mean_image', default=None, help='Mean image file to subtract')
     parser.add_argument('--gpu', help='Id of the GPU to use (as reported by nvidia-smi).')
     parser.add_argument('--score-threshold', help='Threshold on score to filter detections with (defaults to 0.05).', default=0.05, type=float)
     parser.add_argument('--image_min_side', help='Minimum image side to rescale input to', default=1100, type=int)
     parser.add_argument('--image_max_side', help='Maximum image side to rescale input to', default=1650, type=int)
+    parser.add_argument('--num_channels', type=int, default=3, help='Number of channels in input images')
 
     return parser.parse_args()
 
@@ -84,7 +85,8 @@ if __name__ == '__main__':
         args.mean_image,
         test_image_data_generator,
         image_min_side=args.image_min_side,
-        image_max_side=args.image_max_side)
+        image_max_side=args.image_max_side,
+        num_channels=args.num_channels)
     # start collecting results
     results = []
     image_ids = []
@@ -111,14 +113,14 @@ if __name__ == '__main__':
 
         # compute predicted labels and scores
         for detection in detections[0, ...]:
-            label = np.argmax(detection[4:])
+            label = int(detection[4])
             # append detections for each positively labeled class
             if float(detection[4 + label]) > args.score_threshold:
                 image_result = {
                     'image_id'    : test_generator.image_names[i],
                     'category_id' : test_generator.label_to_name(label),
                     'scores'      : [float(det) for i,det in 
-                                     enumerate(detection) if i >= 4],
+                                     enumerate(detection) if i >= 5],
                     'bbox'        : (detection[:4]).tolist(),
                 }
                 # append detection to results

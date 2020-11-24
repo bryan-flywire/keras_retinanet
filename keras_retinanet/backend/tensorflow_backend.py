@@ -29,6 +29,8 @@ def resize_images(*args, **kwargs):
 def non_max_suppression(*args, **kwargs):
     return tensorflow.image.non_max_suppression(*args, **kwargs)
 
+def non_max_suppression_with_scores(*args, **kwargs):
+    return tensorflow.image.non_max_suppression_with_scores(*args, **kwargs)
 
 def range(*args, **kwargs):
     return tensorflow.range(*args, **kwargs)

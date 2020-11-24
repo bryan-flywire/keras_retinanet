@@ -16,7 +16,8 @@ limitations under the License.
 """
 
 from .generator import Generator
-from ..utils.image import read_image_bgr
+from ..utils.image import read_image_bgr, read_image_as_mono, read_image_as_grayscale
+from ..utils.image import resize_image
 
 import numpy as np
 from PIL import Image
@@ -109,12 +110,20 @@ class CSVGenerator(Generator):
         mean_image_file,
         image_data_generator,
         base_dir=None,
+        num_channels=3,
         **kwargs
     ):
         self.image_names = []
         self.image_data  = {}
         self.base_dir    = base_dir
-        if mean_image_file:
+
+        if num_channels == 3: 
+            self.image_type = 'rgb'
+        else:
+            self.image_type = 'mono'
+            
+        if mean_image_file is not None:
+
             self.mean_image = np.load(mean_image_file)
         else:
             self.mean_image = None
@@ -165,9 +174,22 @@ class CSVGenerator(Generator):
         return float(image.width) / float(image.height)
 
     def load_image(self, image_index):
-        img = read_image_bgr(self.image_path(image_index))
-        if self.mean_image:
-            assert img.shape == self.mean_image.shape, "shape mismatch for {}".format(self.image_path(image_index))
+        image_loaders = {
+            'rgb' : read_image_bgr,
+            'mono': read_image_as_grayscale
+        }
+
+        try:
+            img_path = self.image_path(image_index)
+            img = image_loaders[self.image_type](img_path)
+        except Exception as e:
+            print(f"Couldn't load {img_path}, trying again.")
+            try:
+                time.sleep(5.0)
+                img = image_loaders[self.image_type](img_path)
+            except:
+                print("Still failed!")
+                raise e
         return img
 
     def load_annotations(self, image_index):

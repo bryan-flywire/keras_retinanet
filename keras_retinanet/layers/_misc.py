@@ -76,10 +76,11 @@ class Anchors(keras.layers.Layer):
 
 
 class NonMaximumSuppression(keras.layers.Layer):
-    def __init__(self, nms_threshold=0.4, top_k=None, max_boxes=300, *args, **kwargs):
+    def __init__(self, nms_threshold=0.4, top_k=None, max_boxes=300, soft_nms_sigma=0.00, *args, **kwargs):
         self.nms_threshold = nms_threshold
         self.top_k         = top_k
         self.max_boxes     = max_boxes
+        self.soft_nms_sigma = soft_nms_sigma
         super(NonMaximumSuppression, self).__init__(*args, **kwargs)
 
     def call(self, inputs, **kwargs):
@@ -89,14 +90,8 @@ class NonMaximumSuppression(keras.layers.Layer):
     def loopBody(self, detections):
         boxes = detections[:,:4]
         classification = detections[:,4:]
-
-        # TODO: support batch size > 1.
-        #boxes          = boxes[0]
-        #classification = classification[0]
-        #detections     = detections[0]
-
+        
         scores = keras.backend.max(classification, axis=1)
-
         # selecting best anchors theoretically improves speed at the cost of minor performance
         if self.top_k:
             scores, indices = backend.top_k(scores, self.top_k, sorted=False)
@@ -104,13 +99,35 @@ class NonMaximumSuppression(keras.layers.Layer):
             classification  = keras.backend.gather(classification, indices)
             detections      = keras.backend.gather(detections, indices)
 
-        indices = backend.non_max_suppression(boxes, scores, max_output_size=self.max_boxes, iou_threshold=self.nms_threshold)
+        indices, new_scores = backend.non_max_suppression_with_scores(
+            boxes,
+            scores,
+            max_output_size=self.max_boxes,
+            iou_threshold=self.nms_threshold,
+            soft_nms_sigma=self.soft_nms_sigma)
 
         detections = keras.backend.gather(detections, indices)
-        return detections
+        
+        original_scores = keras.backend.gather(scores, indices)
+        # Degrade the classification vector
+        classification = detections[:,4:]
+        label = keras.backend.argmax(classification,axis=1)
+        label = keras.backend.cast(label, 'float32')
+        degrade_scale = new_scores / original_scores
+        
+        # Need to expand to have tensorflow support the broadcast multiplication
+        expanded_degrade=keras.backend.expand_dims(degrade_scale, axis=1)
+        scaled_classification = classification * expanded_degrade
+
+        expanded_label = keras.backend.expand_dims(label, axis=1)
+        detections_with_new_scores = keras.backend.concatenate([detections[:,:4], expanded_label, scaled_classification], axis=1)
+        return detections_with_new_scores
 
     def compute_output_shape(self, input_shape):
-        return (input_shape[2][0], None, input_shape[2][2])
+        # Output bounding box(4), label(1), classification_vector(N)
+        # where N is number of species
+        # bounding box is in p1,p2 format of the diagonols
+        return (input_shape[2][0], None, input_shape[2][2]+1)
 
     def get_config(self):
         config = super(NonMaximumSuppression, self).get_config()
@@ -219,4 +236,3 @@ class DropoutBayes(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape):
         return input_shape
-

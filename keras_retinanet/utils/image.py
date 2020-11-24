@@ -26,41 +26,114 @@ def read_image_bgr(path):
     image = np.asarray(Image.open(path).convert('RGB'))
     return image[:, :, ::-1].copy()
 
+def read_image_as_mono(path,channel=0):
+    image = np.asarray(Image.open(path).convert('RGB'))
+    return np.expand_dims(image[:,:,channel].copy(),axis=-1)
 
+def read_image_as_grayscale(path):
+    image = np.asarray(Image.open(path).convert('L'))
+    return np.expand_dims(image.copy(), axis=-1)
+
+def preprocess_gray_image(x, mean_image=None):
+    x = x.astype(keras.backend.floatx())
+    # image size check
+    if keras.backend.image_data_format() == 'channels_first':
+        if x.ndim == 3:
+            if mean_image is not None:
+                if not mean_image.shape == x.shape:
+                    mean_image,_ = resize_image(mean_image, x.shape[1], x.shape[2])
+                mean_image = mean_image[::-1]
+                x[0, :, :] -= mean_image[0, :, :]
+            else:
+                x[0, :, :] -= 67.637 # MBARI specific number
+        else:
+            if mean_image is not None:
+                if not mean_image.shape == x.shape:
+                    mean_image,_ = resize_image(mean_image, x.shape[1], x.shape[2])
+                x[:, 0, :, :] -= mean_image[0, :, :]
+            else:
+                x[:, 0, :, :] -= 67.637 # MBARI specific number
+    else:
+        if mean_image is not None:
+            if not mean_image.shape == x.shape:
+                mean_image,_ = resize_image(mean_image, x.shape[0], x.shape[1])
+            x[..., 0] -= mean_image[:, :, 0]
+        else:
+            x[..., 0] -= 67.637 # MBARI specific number
+
+    return x
+    
+
+def preprocess_mono_image(x, mean_image=None):
+    x = x.astype(keras.backend.floatx())
+    # image size check
+    if keras.backend.image_data_format() == 'channels_first':
+        if x.ndim == 3:
+            if mean_image is not None:
+                if not mean_image.shape == x.shape:
+                    mean_image,_ = resize_image(mean_image, x.shape[1], x.shape[2])
+                mean_image = mean_image[::-1]
+                x[0, :, :] -= mean_image[0, :, :]
+            else:
+                x[0, :, :] -= 123.68 # Corresponds to red channel for ImageNet mean
+        else:
+            if mean_image is not None:
+                if not mean_image.shape == x.shape:
+                    mean_image,_ = resize_image(mean_image, x.shape[1], x.shape[2])
+                x[:, 0, :, :] -= mean_image[0, :, :]
+            else:
+                x[:, 0, :, :] -= 123.68 # Corresponds to red channel for ImageNet mean
+    else:
+        if mean_image is not None:
+            if not mean_image.shape == x.shape:
+                mean_image,_ = resize_image(mean_image, x.shape[0], x.shape[1])
+            x[..., 0] -= mean_image[:, :, 0]
+        else:
+            x[..., 0] -= 123.68 # Corresponds to red channel for ImageNet mean
+
+    return x
+    
 def preprocess_image(x, mean_image=None):
     # mostly identical to "https://github.com/fchollet/keras/blob/master/keras/applications/imagenet_utils.py"
     # except for converting RGB -> BGR since we assume BGR already
     x = x.astype(keras.backend.floatx())
+    # image size check
     if keras.backend.image_data_format() == 'channels_first':
         if x.ndim == 3:
             if mean_image is not None:
+                if not mean_image.shape == x.shape:
+                    mean_image,_ = resize_image(mean_image, x.shape[1], x.shape[2])
                 mean_image = mean_image[::-1]
                 x[0, :, :] -= mean_image[0, :, :]
                 x[1, :, :] -= mean_image[1, :, :]
                 x[2, :, :] -= mean_image[2, :, :]
             else:
-                x[0, :, :] -= 0 #103.939
-                x[1, :, :] -= 0 #116.779
-                x[2, :, :] -= 0 #123.68
+                x[0, :, :] -= 103.939
+                x[1, :, :] -= 116.779
+                x[2, :, :] -= 123.68
         else:
             if mean_image is not None:
+                if not mean_image.shape == x.shape:
+                    mean_image,_ = resize_image(mean_image, x.shape[1], x.shape[2])
                 mean_image = mean_image[::-1]
                 x[:, 0, :, :] -= mean_image[0, :, :]
                 x[:, 1, :, :] -= mean_image[1, :, :]
                 x[:, 2, :, :] -= mean_image[2, :, :]
             else:
-                x[:, 0, :, :] -= 0 #103.939
-                x[:, 1, :, :] -= 0 #116.779
-                x[:, 2, :, :] -= 0 #123.68
+                x[:, 0, :, :] -= 103.939
+                x[:, 1, :, :] -= 116.779
+                x[:, 2, :, :] -= 123.68
     else:
         if mean_image is not None:
+            if not mean_image.shape == x.shape:
+                mean_image,_ = resize_image(mean_image, x.shape[0], x.shape[1])
             x[..., 0] -= mean_image[:, :, 0]
             x[..., 1] -= mean_image[:, :, 1]
             x[..., 2] -= mean_image[:, :, 2]
         else:
-            x[..., 0] -= 0 #103.939
-            x[..., 1] -= 0 #116.779
-            x[..., 2] -= 0 #123.68
+            x[..., 0] -= 103.939
+            x[..., 1] -= 116.779
+            x[..., 2] -= 123.68
 
     return x
 
@@ -86,9 +159,9 @@ def random_transform(
         mask = np.zeros_like(image, dtype=np.uint8)
         b = boxes[index, :4].astype(int)
 
-        assert(b[0] < b[2] and b[1] < b[3]), 'Annotations contain invalid box: {}'.format(b)
-        assert(b[2] <= image.shape[1] and b[3] <= image.shape[0]), \
-                'Annotation ({}) is outside of image shape ({}).'.format(b, image.shape)
+        if b[0] >= b[2] or b[1] >= b[3]:
+            invalid_boxes.append(index)
+            continue
 
         mask[b[1]:b[3], b[0]:b[2], :] = 255
         mask = image_data_generator.random_transform(mask, seed=seed)[..., 0]
@@ -106,11 +179,7 @@ def random_transform(
         boxes[index, 3] = float(max(i)) + 1  # set box to an open interval [min, max)
 
     invalid_boxes = sorted(invalid_boxes,reverse=True)
-    if len(invalid_boxes) == len(boxes):
-        print("Deleted all boxes")
     boxes = np.delete(boxes,invalid_boxes,axis=0)
-    #for box_elem in invalid_boxes:
-    #    del boxes[box_elem]
 
     # restore fill_mode
     image_data_generator.fill_mode = fill_mode
@@ -120,7 +189,6 @@ def random_transform(
 
 def resize_image(img, min_side=600, max_side=1024):
     (rows, cols, _) = img.shape
-
     smallest_side = min(rows, cols)
 
     # rescale the image so the smallest side is min_side
@@ -133,7 +201,9 @@ def resize_image(img, min_side=600, max_side=1024):
         scale = max_side / largest_side
     # resize the image with the computed scale
     img = cv2.resize(img, None, fx=scale, fy=scale)
-
+    if len(img.shape) < 3:
+        img = np.expand_dims(img,axis=-1)
+    #img = cv2.resize(img, (max_side,min_side))
     return img, scale
 
 def bb_intersection_over_union(boxA, boxB):
@@ -152,3 +222,40 @@ def bb_intersection_over_union(boxA, boxB):
     iou = interArea / float(boxAArea + boxBArea - interArea)
     # return the intersection over union value
     return iou
+
+def resize_and_fill(image, desired_shape):
+    """
+    Resize an image to a desired shape (height,width) and maintaining
+    the aspect ratio. Fill any extra areas with black.
+    :param image: ndarray of the image
+    :param desired_shape: tuple describing the output shape
+
+    :returns image_resized,scaleFactor:
+    image_resized is ndarray represented the scaled + padded image
+    scaleFactor Given a pixel coordinate in the original this factor should
+    be applied to land on the new image.
+    """
+    image_height=image.shape[0]
+    image_width=image.shape[1]
+    image_channels=image.shape[2]
+
+    desired_width=desired_shape[1]
+    desired_height=desired_shape[0]
+    growth_factor=min(desired_height/image_height,
+                           desired_width/image_width)
+    new_height=int(image_height*growth_factor)
+    new_width=int(image_width*growth_factor)
+    image_resized,_=resize_image(image,new_height,new_width)
+    added_rows=desired_height-new_height
+    added_cols=desired_width-new_width
+
+    if added_rows:
+        black_bar=np.zeros((added_rows, new_width, image_channels))
+        image_resized = np.append(image_resized,black_bar, axis=0)
+
+    if added_cols:
+        black_bar=np.zeros((new_height, added_cols, image_channels))
+        image_resized = np.append(image_resized,black_bar, axis=1)
+
+    scaleFactor=(float(new_height)/image_height,float(new_width)/image_width)
+    return image_resized, scaleFactor

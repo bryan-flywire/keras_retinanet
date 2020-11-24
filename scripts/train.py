@@ -16,12 +16,10 @@ limitations under the License.
 from PIL import Image
 import argparse
 import os
-from multiprocessing import Queue
-from multiprocessing import Process
-
 import keras
 import keras.preprocessing.image
 from keras.utils import multi_gpu_model
+import sys
 
 import tensorflow as tf
 
@@ -30,24 +28,10 @@ import keras_retinanet.layers
 from keras_retinanet.callbacks import RedirectModel
 from keras_retinanet.preprocessing.pascal_voc import PascalVocGenerator
 from keras_retinanet.preprocessing.csv_generator import CSVGenerator
-from keras_retinanet.preprocessing.image_preprocessor import ImagePreProcessor
-from keras_retinanet.models.resnet import ResNet152RetinaNet
+from keras_retinanet.models.resnet import ResNet18RetinaNet, ResNet50RetinaNet
+from keras_retinanet.models.resnet import ResNet101RetinaNet,ResNet152RetinaNet
 from keras_retinanet.utils.keras_version import check_keras_version
-
-def generator(batch_queue):
-    """ Yields data batches from a queue.
-        Inputs:
-        batch_queue - Queue containing tuples of images pairs and labels.
-    """
-    while True:
-        yield batch_queue.get(True, None)
-
-def provider(data_provider):
-    """ Pushes data onto the queue.
-        Inputs:
-        data_provider - A CSVGenerator object.
-    """
-    data_provider.start()
+from keras_retinanet.utils.transform import random_transform_generator
 
 def get_session():
     config = tf.ConfigProto()
@@ -55,18 +39,33 @@ def get_session():
     return tf.Session(config=config)
 
 
-def create_models(num_classes, weights='imagenet', multi_gpu=0):
+def create_models(num_classes, backbone, weights='imagenet', multi_gpu=0, checkpoint=False, num_channels=3):
     # create "base" model (no NMS)
-    image = keras.layers.Input((None, None, 3))
-
+    # backbone is a string matching the choices in the argparse
+    image = keras.layers.Input((None, None, num_channels))
+    if (weights == 'None') or (weights == None):
+        weights = None
     # Keras recommends initialising a multi-gpu model on the CPU to ease weight sharing, and to prevent OOM errors.
     # optionally wrap in a parallel model
+
+    if backbone == "resnet18":
+        ModelClass = ResNet18RetinaNet
+    elif backbone == "resnet50":
+        ModelClass = ResNet50RetinaNet
+    elif backbone == "resnet101":
+        ModelClass = ResNet101RetinaNet
+    elif backbone == "resnet152":
+        ModelClass = ResNet152RetinaNet
+    else:
+        print("Invalid backbone selected!")
+        sys.exit(-1)
+
     if multi_gpu > 1:
         with tf.device('/cpu:0'):
-            model = ResNet152RetinaNet(image, num_classes=num_classes, weights=weights, nms=False)
+            model = ModelClass(image, num_classes=num_classes, weights=weights, nms=False)
         training_model = multi_gpu_model(model, gpus=multi_gpu)
     else:
-        model = ResNet152RetinaNet(image, num_classes=num_classes, weights=weights, nms=False)
+        model = ModelClass(image, num_classes=num_classes, weights=weights, nms=False)
         training_model = model
 
     # append NMS for prediction only
@@ -77,12 +76,20 @@ def create_models(num_classes, weights='imagenet', multi_gpu=0):
     prediction_model = keras.models.Model(inputs=model.inputs, outputs=model.outputs[:2] + [detections])
 
     # compile model
+    if checkpoint:
+        learning_rate = 1e-7
+    else:
+        learning_rate = 1e-5
+    if weights == None:
+        learning_rate = 1e-3
+
     training_model.compile(
         loss={
             'regression'    : keras_retinanet.losses.smooth_l1(),
             'classification': keras_retinanet.losses.focal()
         },
-        optimizer=keras.optimizers.adam(lr=1e-5, clipnorm=0.001)
+        #optimizer=keras.optimizers.SGD(lr=learning_rate, momentum=0.9, decay=0.0007092, clipnorm=0.001)
+        optimizer=keras.optimizers.Adam(lr=learning_rate, clipnorm=0.001)
     )
 
     return model, training_model, prediction_model
@@ -102,7 +109,7 @@ def create_callbacks(
     checkpoint = keras.callbacks.ModelCheckpoint(
         os.path.join(
             snapshot_path,
-            'resnet152_{dataset_type}_{{epoch:02d}}.h5'.format(dataset_type=dataset_type)
+            '{backbone}_{dataset_type}_{{epoch:02d}}.h5'.format(backbone=args.backbone,dataset_type=dataset_type)
         ),
         verbose=1
     )
@@ -132,20 +139,20 @@ def create_callbacks(
         callbacks.append(evaluation)
 
     lr_scheduler = keras.callbacks.ReduceLROnPlateau(
-        monitor='loss',
-        factor=0.1,
-        patience=2,
-        verbose=1,
-        mode='auto',
-        epsilon=0.0001,
-        cooldown=0,
-        min_lr=0)
+        monitor=args.lr_monitor,
+        factor=args.lr_factor,
+        patience=args.lr_patience,
+        verbose=args.lr_verbose,
+        mode=args.lr_mode,
+        min_delta=args.lr_min_delta,
+        cooldown=args.lr_cooldown,
+        min_lr=args.lr_min_lr)
     callbacks.append(lr_scheduler)
 
     return callbacks
 
 
-def create_generators(args,group_queue):
+def create_generators(args):
     # create image data generator objects
     train_image_data_generator = keras.preprocessing.image.ImageDataGenerator(
         horizontal_flip=True,
@@ -153,10 +160,12 @@ def create_generators(args,group_queue):
         zoom_range=0.15,
         rotation_range=25
     )
-#    train_image_data_generator = keras.preprocessing.image.ImageDataGenerator(
-#        horizontal_flip=True
-#    )
-    val_image_data_generator = keras.preprocessing.image.ImageDataGenerator()
+    val_image_data_generator = keras.preprocessing.image.ImageDataGenerator(
+        horizontal_flip=True,
+        vertical_flip=True,
+        zoom_range=0.15,
+        rotation_range=25
+    )
 
     if args.dataset_type == 'coco':
         # import here to prevent unnecessary dependency on cocoapi
@@ -198,7 +207,9 @@ def create_generators(args,group_queue):
             batch_size=args.batch_size,
             image_min_side=int(args.image_min_side),
             image_max_side=int(args.image_max_side),
-            group_queue=group_queue
+            num_channels=args.num_channels,
+            base_dir=args.train_img_dir,
+            force_aspect_ratio=args.force_aspect_ratio
         )
 
         if args.val_annotations:
@@ -207,12 +218,18 @@ def create_generators(args,group_queue):
                 args.classes,
                 args.mean_image,
                 val_image_data_generator,
-                batch_size=args.batch_size
+                batch_size=args.batch_size,
+                image_min_side=int(args.image_min_side),
+                image_max_side=int(args.image_max_side),
+                num_channels=args.num_channels,
+                base_dir=args.train_img_dir,
+                force_aspect_ratio=args.force_aspect_ratio
             )
         else:
             validation_generator = None
     else:
-        raise ValueError('Invalid data type received: {}'.format(dataset_type))
+        raise ValueError(
+            'Invalid data type received: {}'.format(args.dataset_type))
 
     return train_generator, validation_generator
 
@@ -248,10 +265,11 @@ def parse_args():
     csv_parser = subparsers.add_parser('csv')
     csv_parser.add_argument('annotations', help='Path to CSV file containing annotations for training.')
     csv_parser.add_argument('classes', help='Path to a CSV file containing class label mapping.')
-    csv_parser.add_argument('--mean_image',help='Path to mean image of data set to subtract (optional).')
+    csv_parser.add_argument('--mean_image', default=None, help='Path to mean image of data set to subtract (optional).')
     csv_parser.add_argument('--val-annotations', help='Path to CSV file containing annotations for validation (optional).')
     csv_parser.add_argument('--image_min_side', default=1080, help='Length of minimum image side. Image will be scaled to this')
     csv_parser.add_argument('--image_max_side', default=1920, help='Length of maximum image side. Image will be scaled to this')
+    csv_parser.add_argument('--force-aspect-ratio', help='Force a given aspect ratio prior to resizing')
 
     parser.add_argument('--weights', help='Weights to use for initialization (defaults to ImageNet).', default='imagenet')
     parser.add_argument('--train_img_dir', help='Path to training images')
@@ -261,6 +279,26 @@ def parse_args():
     parser.add_argument('--snapshot-path', help='Path to store snapshots of models during training (defaults to \'./snapshots\')', default='./snapshots')
     parser.add_argument('--log-dir', default=None, help='path to store tensorboard logs')
     parser.add_argument('--num_processors', type=int, default=8, help='Number of image preprocessing objects')
+    parser.add_argument('--resume', action='store_true', help='Adjust learning parameters for resume or transfer learning')
+    parser.add_argument('--num_channels', type=int, default=3, help='Number of channels in input images')
+    parser.add_argument('--steps-per-epoch', type=int, required=True, help='Should be #imgs / batch size')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
+    parser.add_argument('--verbosity', type=int, default=1, choices=[0,1,2], help='verbosity to fit generator')
+    parser.add_argument('--train-img-dir', help='Path to images')
+
+    parser.add_argument('--backbone', default="resnet50", choices=["resnet18", "resnet50","resnet101","resnet152"])
+
+    # Parameters for LR scheduler
+    parser.add_argument('--lr-monitor', default='loss', help='Quantity to be monitored')
+    parser.add_argument('--lr-factor', default=0.1, type=float, help='Factor by which the learning rate will be reduced. new_lr = lr * factor')
+    parser.add_argument('--lr-patience', default=3, type=int, help="number of epochs that produced the monitored quantity with no improvement after which training will be stopped. Validation quantities may not be produced for every epoch, if the validation frequency (model.fit(validation_freq=5)) is greater than one.")
+    parser.add_argument('--lr-verbose', default=1, choices=[1,2], help='update messages')
+    parser.add_argument('--lr-mode', default='min', choices=['min','max','auto'],
+                         help="In min mode, lr will be reduced when the quantity monitored has stopped decreasing; in max mode it will be reduced when the quantity monitored has stopped increasing; in auto mode, the direction is automatically inferred from the name of the monitored quantity.")
+    parser.add_argument('--lr-min-delta', default=0.01, help="threshold for measuring the new optimum, to only focus on significant changes.", type=float)
+    parser.add_argument('--lr-cooldown', default=0, help="number of epochs to wait before resuming normal operation after lr has been reduced.", type=float)
+    parser.add_argument('--lr-min-lr', default=1e-8, help="lower bound on the learning rate.", type=float)
+
 
     return check_args(parser.parse_args())
 
@@ -276,43 +314,18 @@ if __name__ == '__main__':
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     keras.backend.tensorflow_backend.set_session(get_session())
 
-    group_queue = Queue(20)
-    image_queue = Queue(20)
     # create the generators
-    train_generator, validation_generator = create_generators(args,group_queue)
-
-    train_process = Process(target=provider, args=(train_generator,))
-    train_process.daemon = True
-    train_process.start()
-    train_data_generator = generator(image_queue)
-    img_processes = []
-    for num in range(args.num_processors):
-        image_data_generator = keras.preprocessing.image.ImageDataGenerator(
-            horizontal_flip=True,
-            vertical_flip=True,
-            zoom_range=0.15,
-            rotation_range=25
-            )
-
-        data_generator = ImagePreProcessor(
-            args.annotations,
-            args.classes,
-            args.mean_image,
-            image_data_generator,
-            group_queue,
-            image_queue,
-            batch_size=args.batch_size,
-            image_min_side=int(args.image_min_side),
-            image_max_side=int(args.image_max_side),
-        )
-        image_process = Process(target=provider, args=(data_generator,))
-        image_process.daemon = True
-        image_process.start()
-        img_processes.append(image_process)
+    train_generator, validation_generator = create_generators(args)
 
     # create the model
     print('Creating model, this may take a second...')
-    model, training_model, prediction_model = create_models(num_classes=train_generator.num_classes(), weights=args.weights, multi_gpu=args.multi_gpu)
+    model, training_model, prediction_model = create_models(
+            num_classes=train_generator.num_classes(),
+            backbone=args.backbone,
+            weights=args.weights,
+            multi_gpu=args.multi_gpu,
+            checkpoint=args.resume,
+            num_channels=args.num_channels)
 
     # print model summary
     #print(model.summary())
@@ -320,18 +333,15 @@ if __name__ == '__main__':
     # create the callbacks
     callbacks = create_callbacks(model, training_model, prediction_model, validation_generator, args.dataset_type, args.snapshot_path, args)
 
-
     # start training
     training_model.fit_generator(
-        generator=train_data_generator,
-        steps_per_epoch=500,
-        epochs=500,
-        verbose=1,
+        generator=train_generator,
+        steps_per_epoch=args.steps_per_epoch,
+        epochs=args.epochs,
+        verbose=args.verbosity,
         callbacks=callbacks,
+        use_multiprocessing=False,
+        workers=args.num_processors,
+        max_queue_size = 30,
+        validation_data=validation_generator
     )
-
-    for proc in img_processes:
-        proc.terminate()
-        proc.join()
-    train_process.terminate()
-    train_process.join()
