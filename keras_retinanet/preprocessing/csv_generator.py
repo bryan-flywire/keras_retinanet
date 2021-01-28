@@ -114,6 +114,7 @@ class CSVGenerator(Generator):
         **kwargs
     ):
         self.image_names = []
+        self.video_names = []
         self.image_data  = {}
         self.base_dir    = base_dir
 
@@ -146,12 +147,45 @@ class CSVGenerator(Generator):
         # csv with img_path, x1, y1, x2, y2, class_name
         try:
             with _open_for_csv(csv_data_file) as file:
-                self.image_data = _read_annotations(csv.reader(file, delimiter=','), self.classes)
-        except ValueError as e:
+                self.image_data, self.video_names = _read_video_annotations(reader, self.classes)        except ValueError as e:
             raise_from(ValueError('invalid CSV annotations file: {}: {}'.format(csv_data_file, e)), None)
         self.image_names = list(self.image_data.keys())
-
+        self.video_data = self.__parse_video_data()
         super(CSVGenerator, self).__init__(image_data_generator, **kwargs)
+
+    def __parse_video_data(self):
+        video_data = []
+        for video in self.video_names.keys():
+            print(video)
+            for det in self.video_names[video]:
+                frame_num = int(det['frame'])
+                # Max frame num is 8978 atm
+                # TODO: Make dynamic based on video fps & length
+                if frame_num > 8978:
+                    frame_num = 8978
+                cap = cv2.VideoCapture(video)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if ret:
+                    print(frame_num)
+                    self.video_data.append(frame)
+                else:
+                    print("Extracting frame {} failed....".format(frame_num))
+                    ret, frame = cap.read()
+                    if ret:
+                        video_data.append(frame)
+                    else:
+                        # Retry 4 times, throw exception on fail
+                        for i in range(4):
+                            print("Extracting frame {} failed again, retrying...".format(frame_num))
+                            ret, frame = cap.read()
+                            if ret:
+                                video_data.append(frame)
+                                break
+                            else:
+                                if i == 4:
+                                    raise Exception
+        return video_data
 
     def size(self):
         return len(self.image_names)
@@ -174,22 +208,8 @@ class CSVGenerator(Generator):
         return float(image.width) / float(image.height)
 
     def load_image(self, image_index):
-        image_loaders = {
-            'rgb' : read_image_bgr,
-            'mono': read_image_as_grayscale
-        }
-
-        try:
-            img_path = self.image_path(image_index)
-            img = image_loaders[self.image_type](img_path)
-        except Exception as e:
-            print(f"Couldn't load {img_path}, trying again.")
-            try:
-                time.sleep(5.0)
-                img = image_loaders[self.image_type](img_path)
-            except:
-                print("Still failed!")
-                raise e
+        image_index = image_index - 1 # zero based
+        img = self.video_data[image_index]
         return img
 
     def load_annotations(self, image_index):
